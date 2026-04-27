@@ -1,13 +1,14 @@
 import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-st.header("1D FDTD Microwave Simulation")
+st.header("1D FDTD: Healthy vs. Tumor Tissue")
+st.markdown("Compare wave propagation side-by-side to observe backscatter and phase delays caused by the tumor's higher dielectric constant.")
 
 # Sidebar Controls
 with st.sidebar:
     st.subheader("Biological Parameters")
-    # Expanded Tissue Library
     tissue_type = st.selectbox("Background Tissue", ["Fat", "Fibroglandular", "Skin", "Muscle"])
     tumor_depth = st.slider("Tumor Depth (mm)", 10, 100, 50, step=5)
     tumor_radius = st.slider("Tumor Radius (mm)", 5, 20, 10)
@@ -15,9 +16,9 @@ with st.sidebar:
     st.subheader("Wave Parameters")
     freq = st.slider("Frequency (GHz)", 1.0, 10.0, 2.4, step=0.1)
     pulse_width = st.slider("Pulse Width (ns)", 0.1, 2.0, 0.5)
-    sim_time = st.slider("Simulation Time (steps)", 100, 500, 300, step=50)
+    sim_time = st.slider("Simulation Time (steps)", 100, 600, 400, step=50)
 
-# Expanded Dielectric Constants (Approximate at microwave frequencies)
+# Expanded Dielectric Constants
 eps_r_map = {
     "Fat": 5.3, 
     "Fibroglandular": 15.0, 
@@ -31,59 +32,101 @@ dx = 0.001  # 1mm spatial step
 size = 200  # grid size
 dt = dx / (2 * c0)  # CFL condition
 
-# Simulation Engine
-def run_fdtd():
-    ez = np.zeros(size)
-    hy = np.zeros(size)
+@st.cache_data
+def run_dual_fdtd(tissue, t_depth, t_radius, frequency, p_width, s_time):
+    # Initialize fields for HEALTHY tissue
+    ez_h = np.zeros(size)
+    hy_h = np.zeros(size)
+    eps_h = np.ones(size) * eps_r_map[tissue]
     
-    # Material Profile Setup
-    eps = np.ones(size) * eps_r_map[tissue_type]
+    # Initialize fields for TUMOR tissue
+    ez_t = np.zeros(size)
+    hy_t = np.zeros(size)
+    eps_t = np.ones(size) * eps_r_map[tissue]
     
-    # Map mm to grid indices
-    t_start = int(tumor_depth)
-    t_end = t_start + int(tumor_radius * 2)
-    
-    # Ensure tumor stays within grid bounds
+    # Map tumor mm to grid indices for the tumor profile
+    t_start = int(t_depth)
+    t_end = t_start + int(t_radius * 2)
     if t_end < size:
-        eps[t_start:t_end] = eps_r_map["Tumor"]
-    
+        eps_t[t_start:t_end] = eps_r_map["Tumor"]
+        
     frames = []
-    # Gaussian pulse spread parameter based on user input
-    spread = (pulse_width * 1e-9 / dt) ** 2 
+    spread = (p_width * 1e-9 / dt) ** 2 
     
-    for t in range(sim_time):
-        # Source (Gaussian Pulse modulated by continuous wave)
-        ez[5] += np.exp(-((t - 50)**2) / spread) * np.sin(2 * np.pi * freq * 1e9 * t * dt)
+    for t in range(s_time):
+        # Source (Gaussian Pulse) for both grids
+        source_val = np.exp(-((t - 50)**2) / spread) * np.sin(2 * np.pi * frequency * 1e9 * t * dt)
+        ez_h[5] += source_val
+        ez_t[5] += source_val
         
-        # Update H and E
-        hy[:-1] += 0.5 * (ez[1:] - ez[:-1])
-        ez[1:] += (0.5 / eps[1:]) * (hy[1:] - hy[:-1])
+        # Update H and E for HEALTHY tissue
+        hy_h[:-1] += 0.5 * (ez_h[1:] - ez_h[:-1])
+        ez_h[1:] += (0.5 / eps_h[1:]) * (hy_h[1:] - hy_h[:-1])
         
-        # Capture frames for animation to reduce rendering load
+        # Update H and E for TUMOR tissue
+        hy_t[:-1] += 0.5 * (ez_t[1:] - ez_t[:-1])
+        ez_t[1:] += (0.5 / eps_t[1:]) * (hy_t[1:] - hy_t[:-1])
+        
+        # Capture frames for both subplots
         if t % 5 == 0:
-            frames.append(go.Frame(data=[go.Scatter(x=np.arange(size), y=ez.copy())]))
+            frames.append(go.Frame(
+                data=[
+                    go.Scatter(y=ez_h.copy()), # Updates Trace 1 (Healthy)
+                    go.Scatter(y=ez_t.copy())  # Updates Trace 2 (Tumor)
+                ],
+                traces=[0, 1] # Maps the data to the correct subplots
+            ))
             
-    return frames, eps
+    return frames, eps_h, eps_t
 
-frames, eps_profile = run_fdtd()
+# Run the simulation
+frames, eps_healthy, eps_tumor = run_dual_fdtd(tissue_type, tumor_depth, tumor_radius, freq, pulse_width, sim_time)
 
-# Layout for the graph
-fig = go.Figure(
-    data=[go.Scatter(x=np.arange(size), y=np.zeros(size), name="E-Field")],
-    layout=go.Layout(
-        xaxis=dict(title="Depth (mm)"),
-        yaxis=dict(range=[-2.0, 2.0], title="Electric Field Amplitude"),
-        title=f"Wave Propagation through {tissue_type} with Tumor",
-        updatemenus=[dict(type="buttons", buttons=[dict(label="Play Animation", method="animate", args=[None, {"frame": {"duration": 20, "redraw": True}, "fromcurrent": True}])])]
-    ),
-    frames=frames
+# --- Plotly Side-by-Side Visualization ---
+
+# Create 1x2 Subplots
+fig = make_subplots(rows=1, cols=2, subplot_titles=(f"Healthy {tissue_type}", f"{tissue_type} with Tumor"))
+
+# Add initial empty traces for the animation to update
+fig.add_trace(go.Scatter(x=np.arange(size), y=np.zeros(size), name="Healthy E-Field", line=dict(color="#00b4d8")), row=1, col=1)
+fig.add_trace(go.Scatter(x=np.arange(size), y=np.zeros(size), name="Tumor E-Field", line=dict(color="#fde725")), row=1, col=2)
+
+# Add Tumor overlay shading on the second plot for visual reference
+t_start = int(tumor_depth)
+t_end = t_start + int(tumor_radius * 2)
+fig.add_vrect(x0=t_start, x1=t_end, row=1, col=2, fillcolor="red", opacity=0.1, layer="below", line_width=0, annotation_text="Tumor")
+
+# Layout configuration
+fig.update_layout(
+    template="plotly_dark",
+    yaxis=dict(range=[-2.0, 2.0], title="E-Field Amplitude"),
+    yaxis2=dict(range=[-2.0, 2.0]), # Lock Y-axis for the second plot too
+    xaxis=dict(title="Depth (mm)"),
+    xaxis2=dict(title="Depth (mm)"),
+    updatemenus=[dict(
+        type="buttons", 
+        buttons=[dict(label="Play Comparison", method="animate", args=[None, {"frame": {"duration": 20, "redraw": True}, "fromcurrent": True}])]
+    )]
 )
 
-fig.update_layout(template="plotly_dark", colorway=['#fde725']) # Viridis yellow for high contrast
+# Attach frames to the figure
+fig.frames = frames
+
+# Display in Streamlit
 st.plotly_chart(fig, use_container_width=True)
 
-# Visualize the dielectric profile
-st.subheader("Dielectric Profile ($\epsilon_r$)")
-fig_eps = go.Figure(data=[go.Scatter(x=np.arange(size), y=eps_profile, fill='tozeroy', line_color='#440154')])
-fig_eps.update_layout(template="plotly_dark", xaxis_title="Depth (mm)", yaxis_title="Relative Permittivity")
-st.plotly_chart(fig_eps, use_container_width=True)
+# --- Dielectric Profile Comparison ---
+st.subheader("Dielectric Profiles ($\epsilon_r$)")
+col1, col2 = st.columns(2)
+
+with col1:
+    fig_eps_h = go.Figure(data=[go.Scatter(x=np.arange(size), y=eps_healthy, fill='tozeroy', line_color='#00b4d8')])
+    fig_eps_h.update_layout(template="plotly_dark", xaxis_title="Depth (mm)", yaxis_title="Relative Permittivity", height=300)
+    st.plotly_chart(fig_eps_h, use_container_width=True)
+
+with col2:
+    fig_eps_t = go.Figure(data=[go.Scatter(x=np.arange(size), y=eps_tumor, fill='tozeroy', line_color='#fde725')])
+    # Add same tumor overlay for consistency
+    fig_eps_t.add_vrect(x0=t_start, x1=t_end, fillcolor="red", opacity=0.1, layer="below", line_width=0)
+    fig_eps_t.update_layout(template="plotly_dark", xaxis_title="Depth (mm)", height=300)
+    st.plotly_chart(fig_eps_t, use_container_width=True)
